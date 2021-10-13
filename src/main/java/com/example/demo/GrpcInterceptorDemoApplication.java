@@ -29,28 +29,38 @@ public class GrpcInterceptorDemoApplication {
 		SpringApplication.run(GrpcInterceptorDemoApplication.class, args);
 	}
 
+	// =================================
+	// gRPCサーバ関連のBean定義
+	// =================================
+
+	// リクエストヘッダの情報をAP層へ連携するための魔法の器の定義
 	@Bean
-	public ThreadLocal<Metadata> requestHeaderHolder() {
-		return ThreadLocal.withInitial(Metadata::new);
+	public MetadataHolder metadataHolder() {
+		return new MetadataHolder();
 	}
 
 	@Bean
-	ServerInterceptor serverHeadersInterceptor(ThreadLocal<Metadata> requestHeaderHolder) {
+	ServerInterceptor serverHeadersInterceptor(MetadataHolder metadataHolder) {
 		return new ServerInterceptor() {
 			@Override
 			public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(ServerCall<ReqT, RespT> call,
 					Metadata headers, ServerCallHandler<ReqT, RespT> next) {
-				requestHeaderHolder.set(headers); // リクエストされたヘッダ情報をスレッドローカルへ設定
 				return new ForwardingServerCallListener.SimpleForwardingServerCallListener<ReqT>(
 						next.startCall(call, headers)) {
+
+					@Override public void onMessage(ReqT message) {
+						metadataHolder.save(message, headers); // リクエストされたヘッダ情報を保存
+						super.onMessage(message);
+					}
+
 					@Override
 					public void onComplete() {
-						runWithClearHolder(super::onComplete); // サーバ処理の終了時にスレッドローカルをお掃除
+						runWithClearHolder(super::onComplete); // サーバ処理の終了時にお掃除
 					}
 
 					@Override
 					public void onCancel() {
-						runWithClearHolder(super::onCancel); // サーバ処理の終了時にスレッドローカルをお掃除
+						runWithClearHolder(super::onCancel); // サーバ処理の終了時にお掃除
 					}
 
 					private void runWithClearHolder(Runnable runnable) {
@@ -58,7 +68,7 @@ public class GrpcInterceptorDemoApplication {
 							runnable.run();
 						}
 						finally {
-							requestHeaderHolder.remove();
+							metadataHolder.clear(headers);
 						}
 					}
 				};
@@ -66,13 +76,19 @@ public class GrpcInterceptorDemoApplication {
 		};
 	}
 
+	// gRPCサーバの定義
 	@Bean(initMethod = "start", destroyMethod = "stop")
 	public GrpcServer grpcServer(ServerInterceptor serverHeadersInterceptor,
-			ThreadLocal<Metadata> requestHeaderHolder) {
-		return new GrpcServer(new TransactionStub(requestHeaderHolder))
+			MetadataHolder metadataHolder) {
+		return new GrpcServer(new TransactionStub(metadataHolder))
 				.withInterceptors(serverHeadersInterceptor); // サーバ向けのインタセプタを設定
 	}
 
+	// =================================
+	// gRPCクライアント関連のBean定義
+	// =================================
+
+	// gRPCサーバへ接続するためのチャネルを定義
 	@Bean
 	ManagedChannel grpcManagedChannel() {
 		return ManagedChannelBuilder
@@ -81,6 +97,7 @@ public class GrpcInterceptorDemoApplication {
 				.build();
 	}
 
+	// リクエストヘッダに任意の値を設定するインタセプタの定義
 	@Bean
 	ClientInterceptor clientHeadersInterceptor(Environment environment) {
 		// 任意のヘッダ値を設定してくれるインタセプタを定義
@@ -90,6 +107,7 @@ public class GrpcInterceptorDemoApplication {
 		return MetadataUtils.newAttachHeadersInterceptor(headers);
 	}
 
+	// クライアントAP側の実装
 	@Bean
 	public ApplicationRunner clientRunner(ManagedChannel managedChannel, ClientInterceptor clientHeadersInterceptor) {
 		return args -> {
